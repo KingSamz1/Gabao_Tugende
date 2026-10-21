@@ -251,7 +251,7 @@ init_ad_db()
 # Header and language selector
 with st.sidebar:
     st.markdown("## 🎓 Gabao Tugende")
-    st.session_state.setdefault("language", "English")
+    st.session_state.setdefault("language", "Français")
     st.selectbox("Language / Langue", ["English", "Français"], key="language")
     st.markdown("---")
     st.markdown("### " + tr("tagline"))
@@ -279,19 +279,26 @@ if admin_view:
         st.stop()
     st.success("Administrator authenticated / Administrateur authentifié")
     st.subheader("Homepage banner / Bannière de la page d’accueil")
+    st.caption("Upload up to 10 images for the homepage carousel. Slides rotate every 45 seconds." if st.session_state.language == "English" else "Téléversez jusqu’à 10 images pour le carrousel de la page d’accueil. Les diapositives changent toutes les 45 secondes.")
     with st.form("homepage_banner_upload", clear_on_submit=True):
-        banner_caption = st.text_input("Homepage banner caption / Légende de bannière")
-        banner_file = st.file_uploader("Upload homepage banner / Téléverser une bannière d’accueil", type=["png", "jpg", "jpeg", "webp"], key="homepage_banner_admin")
-        publish_banner = st.form_submit_button("Publish homepage banner / Publier la bannière")
+        banner_caption = st.text_input("Carousel caption / Légende du carrousel")
+        banner_files = st.file_uploader("Upload up to 10 carousel images / Téléverser jusqu’à 10 images", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True, key="homepage_banner_admin")
+        publish_banner = st.form_submit_button("Add images to carousel / Ajouter au carrousel")
     if publish_banner:
-        if not banner_file:
-            st.error("Please select an image." if st.session_state.language == "English" else "Veuillez choisir une image.")
+        if not banner_files:
+            st.error("Please select at least one image." if st.session_state.language == "English" else "Veuillez choisir au moins une image.")
+        elif len(banner_files) > 10:
+            st.error("Please upload no more than 10 images at once." if st.session_state.language == "English" else "Veuillez téléverser 10 images maximum à la fois.")
         else:
-            save_ad("HOMEPAGE BANNER: Gabao Tugende", banner_caption, banner_file)
-            # Banner uploads from the authenticated admin are approved immediately.
+            # Keep the latest ten approved homepage carousel images.
             with sqlite3.connect(DB_PATH) as _conn:
-                _conn.execute("UPDATE advertisements SET status='approved' WHERE title='HOMEPAGE BANNER: Gabao Tugende' AND status='pending'")
-            st.success("Homepage banner published." if st.session_state.language == "English" else "Bannière d’accueil publiée.")
+                _conn.execute("UPDATE advertisements SET status='rejected' WHERE title LIKE 'HOMEPAGE BANNER:%' AND status='approved'")
+            for index, banner_file in enumerate(banner_files, start=1):
+                caption = banner_caption.strip() or banner_file.name
+                save_ad(f"HOMEPAGE BANNER: {index} — {banner_file.name}", caption, banner_file)
+                with sqlite3.connect(DB_PATH) as _conn:
+                    _conn.execute("UPDATE advertisements SET status='approved' WHERE filename=? AND status='pending'", (banner_file.name,))
+            st.success("Carousel images published." if st.session_state.language == "English" else "Images du carrousel publiées.")
             st.rerun()
     pending = get_ads("pending")
     st.subheader("Pending advertisements / Publicités en attente")
@@ -327,9 +334,22 @@ if admin_view:
 if page == tr("nav_home"):
     st.markdown("# 🎓 Gabao Tugende")
     st.caption(tr("tagline"))
-    home_banners = [a for a in get_ads("approved") if a["title"].startswith("HOMEPAGE BANNER:")]
+    home_banners = [a for a in get_ads("approved") if a["title"].startswith("HOMEPAGE BANNER:")][:10]
     if home_banners:
-        st.image(home_banners[0]["image_data"], caption=home_banners[0]["caption"] or home_banners[0]["title"].replace("HOMEPAGE BANNER:", "").strip(), use_container_width=True)
+        try:
+            from streamlit_autorefresh import st_autorefresh
+            carousel_tick = st_autorefresh(interval=45_000, key="gabao_home_carousel_45s")
+        except ImportError:
+            carousel_tick = 0
+            st.info("Install streamlit-autorefresh to rotate slides automatically." if st.session_state.language == "English" else "Installez streamlit-autorefresh pour faire défiler automatiquement les diapositives.")
+        slide_index = (carousel_tick or 0) % len(home_banners)
+        current_slide = home_banners[slide_index]
+        st.image(current_slide["image_data"], caption=current_slide["caption"] or current_slide["title"].replace("HOMEPAGE BANNER:", "").strip(), use_container_width=True)
+        st.caption((f"Slide {slide_index + 1} / {len(home_banners)} · Rotation every 45 seconds" if st.session_state.language == "English" else f"Diapositive {slide_index + 1} / {len(home_banners)} · Rotation toutes les 45 secondes"))
+        if len(home_banners) > 1:
+            chosen_slide = st.select_slider("Carousel / Carrousel", options=list(range(len(home_banners))), value=slide_index, format_func=lambda i: str(i + 1))
+            if chosen_slide != slide_index:
+                st.image(home_banners[chosen_slide]["image_data"], caption=home_banners[chosen_slide]["caption"] or home_banners[chosen_slide]["title"], use_container_width=True)
     left, right = st.columns([1.35, 1])
     with left:
         st.title(tr("hero_title"))
