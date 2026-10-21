@@ -338,14 +338,14 @@ if page == tr("nav_home"):
     if home_banners:
         try:
             from streamlit_autorefresh import st_autorefresh
-            carousel_tick = st_autorefresh(interval=45_000, key="gabao_home_carousel_45s")
+            carousel_tick = st_autorefresh(interval=30_000, key="gabao_home_carousel_30s")
         except ImportError:
             carousel_tick = 0
             st.info("Install streamlit-autorefresh to rotate slides automatically." if st.session_state.language == "English" else "Installez streamlit-autorefresh pour faire défiler automatiquement les diapositives.")
         slide_index = (carousel_tick or 0) % len(home_banners)
         current_slide = home_banners[slide_index]
         st.image(current_slide["image_data"], caption=current_slide["caption"] or current_slide["title"].replace("HOMEPAGE BANNER:", "").strip(), use_container_width=True)
-        st.caption((f"Slide {slide_index + 1} / {len(home_banners)} · Rotation every 45 seconds" if st.session_state.language == "English" else f"Diapositive {slide_index + 1} / {len(home_banners)} · Rotation toutes les 45 secondes"))
+        st.caption((f"Slide {slide_index + 1} / {len(home_banners)} · Rotation every 30 seconds" if st.session_state.language == "English" else f"Diapositive {slide_index + 1} / {len(home_banners)} · Rotation toutes les 45 secondes"))
         if len(home_banners) > 1:
             chosen_slide = st.select_slider("Carousel / Carrousel", options=list(range(len(home_banners))), value=slide_index, format_func=lambda i: str(i + 1))
             if chosen_slide != slide_index:
