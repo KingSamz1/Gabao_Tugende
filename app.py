@@ -233,8 +233,11 @@ def get_admin_password():
 
 @contextlib.contextmanager
 def db_connect():
-    """Open a direct remote Turso connection; never fall back to a local file."""
-    conn = libsql.connect(database=TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
+    """Reuse one Turso connection per Streamlit session to avoid reconnect latency."""
+    conn = st.session_state.get("_gabao_turso_conn")
+    if conn is None:
+        conn = libsql.connect(database=TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
+        st.session_state["_gabao_turso_conn"] = conn
     try:
         yield conn
         conn.commit()
@@ -243,9 +246,13 @@ def db_connect():
             conn.rollback()
         except Exception:
             pass
+        # Discard a failed connection so the next rerun can reconnect cleanly.
+        try:
+            conn.close()
+        except Exception:
+            pass
+        st.session_state.pop("_gabao_turso_conn", None)
         raise
-    finally:
-        conn.close()
 
 
 def rows_as_dicts(cursor):
@@ -361,14 +368,19 @@ if admin_view:
             st.error("Please upload no more than 10 images at once." if st.session_state.language == "English" else "Veuillez téléverser 10 images maximum à la fois.")
         else:
             # Keep the latest ten approved homepage carousel images.
+            now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
             with db_connect() as _conn:
                 _conn.execute("UPDATE advertisements SET status='rejected' WHERE title LIKE 'HOMEPAGE BANNER:%' AND status='approved'")
-            for index, banner_file in enumerate(banner_files, start=1):
-                caption = banner_caption.strip() or banner_file.name
-                banner_id = save_ad(f"HOMEPAGE BANNER: {index} — {banner_file.name}", caption, banner_file)
-                with db_connect() as _conn:
-                    _conn.execute("UPDATE advertisements SET status='approved', reviewed_at=? WHERE id=?",
-                                  (datetime.utcnow().isoformat(timespec="seconds") + "Z", banner_id))
+                for index, banner_file in enumerate(banner_files, start=1):
+                    caption = banner_caption.strip() or banner_file.name
+                    _conn.execute(
+                        """INSERT INTO advertisements
+                        (title, caption, filename, mime_type, image_data, status, submitted_at, reviewed_at)
+                        VALUES (?, ?, ?, ?, ?, 'approved', ?, ?)""",
+                        (f"HOMEPAGE BANNER: {index} — {banner_file.name}", caption,
+                         banner_file.name, banner_file.type or "application/octet-stream",
+                         banner_file.getvalue(), now, now)
+                    )
             st.success("Carousel images published." if st.session_state.language == "English" else "Images du carrousel publiées.")
             st.rerun()
     pending = get_ads("pending")
@@ -437,7 +449,7 @@ if page == tr("nav_home"):
         slide_index = (carousel_tick or 0) % len(home_banners)
         current_slide = home_banners[slide_index]
         st.image(current_slide["image_data"], caption=current_slide["caption"] or current_slide["title"].replace("HOMEPAGE BANNER:", "").strip(), use_container_width=True)
-        st.caption((f"Slide {slide_index + 1} / {len(home_banners)} · Rotation every 45 seconds" if st.session_state.language == "English" else f"Diapositive {slide_index + 1} / {len(home_banners)} · Rotation toutes les 45 secondes"))
+        st.caption((f"Slide {slide_index + 1} / {len(home_banners)} · Rotation every 30 seconds" if st.session_state.language == "English" else f"Diapositive {slide_index + 1} / {len(home_banners)} · Rotation toutes les 30 secondes"))
         if len(home_banners) > 1:
             chosen_slide = st.select_slider("Carousel / Carrousel", options=list(range(len(home_banners))), value=slide_index, format_func=lambda i: str(i + 1))
             if chosen_slide != slide_index:
