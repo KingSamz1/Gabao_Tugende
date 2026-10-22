@@ -197,29 +197,6 @@ def course_dialog(course):
     _dialog()
 
 
-def render_course_grid(courses, key_prefix):
-    """Render course cards consistently in the pinned and regular catalogue."""
-    for start in range(0, len(courses), 2):
-        row = st.columns(2)
-        for col, course in zip(row, courses[start:start + 2]):
-            with col:
-                name = course["name"] if st.session_state.language == "English" else course["fr"]
-                summary = course["summary"] if st.session_state.language == "English" else course["summary_fr"]
-                st.markdown("### " + name)
-                st.caption(
-                    f"{course.get('uni', 'Makerere University')} • "
-                    f"{tr('duration')}: {course['years']} {tr('year')} • "
-                    f"{money(course['fee'])}/{tr('per_year')}"
-                )
-                st.write(summary)
-                if st.button(
-                    tr("enquire"),
-                    key=f"{key_prefix}_enquire_{course['name']}",
-                    use_container_width=True,
-                ):
-                    course_dialog(course)
-
-
 # Advertisement approval workflow. SQLite stores uploads until an admin approves them.
 DB_PATH = os.environ.get("GABAO_DB_PATH", "gabao_tugende.db")
 
@@ -246,10 +223,12 @@ def init_ad_db():
                 submitted_at TEXT NOT NULL, reviewed_at TEXT DEFAULT NULL
             )
         """)
+        # Persistent pin state is stored in SQLite, not Streamlit session state.
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS pinned_courses (
+            CREATE TABLE IF NOT EXISTS course_pins (
                 course_name TEXT PRIMARY KEY,
-                pinned_at TEXT NOT NULL
+                is_pinned INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
             )
         """)
 
@@ -275,25 +254,23 @@ def update_ad_status(ad_id, status):
         conn.execute("UPDATE advertisements SET status=?, reviewed_at=? WHERE id=?",
                      (status, datetime.utcnow().isoformat(timespec="seconds") + "Z", ad_id))
 
-def delete_ad_permanently(ad_id):
-    """Permanently remove an advertisement and its stored image BLOB."""
+def permanently_delete_ad(ad_id):
+    # Images are stored as BLOBs in this row, so deleting the row removes the image data too.
     with db_connect() as conn:
-        conn.execute("DELETE FROM advertisements WHERE id=? AND status='rejected'", (ad_id,))
+        conn.execute("DELETE FROM advertisements WHERE id=?", (int(ad_id),))
 
 def get_pinned_course_names():
     with db_connect() as conn:
-        rows = conn.execute("SELECT course_name FROM pinned_courses ORDER BY pinned_at ASC").fetchall()
-    return [row["course_name"] for row in rows]
+        return {row[0] for row in conn.execute("SELECT course_name FROM course_pins WHERE is_pinned=1").fetchall()}
 
 def set_course_pinned(course_name, pinned):
     with db_connect() as conn:
         if pinned:
-            conn.execute(
-                "INSERT OR IGNORE INTO pinned_courses (course_name, pinned_at) VALUES (?, ?)",
-                (course_name, datetime.utcnow().isoformat(timespec="seconds") + "Z"),
-            )
+            conn.execute("""INSERT INTO course_pins(course_name, is_pinned, updated_at) VALUES (?,1,?)
+                ON CONFLICT(course_name) DO UPDATE SET is_pinned=1, updated_at=excluded.updated_at""",
+                (course_name, datetime.utcnow().isoformat(timespec="seconds") + "Z"))
         else:
-            conn.execute("DELETE FROM pinned_courses WHERE course_name=?", (course_name,))
+            conn.execute("DELETE FROM course_pins WHERE course_name=?", (course_name,))
 
 init_ad_db()
 
@@ -328,7 +305,7 @@ if admin_view:
         st.stop()
     st.success("Administrator authenticated / Administrateur authentifié")
     st.subheader("Homepage banner / Bannière de la page d’accueil")
-    st.caption("Upload up to 10 images for the homepage carousel. Slides rotate every 30 seconds." if st.session_state.language == "English" else "Téléversez jusqu’à 10 images pour le carrousel de la page d’accueil. Les diapositives changent toutes les 30 secondes.")
+    st.caption("Upload up to 10 images for the homepage carousel. Slides rotate every 45 seconds." if st.session_state.language == "English" else "Téléversez jusqu’à 10 images pour le carrousel de la page d’accueil. Les diapositives changent toutes les 45 secondes.")
     with st.form("homepage_banner_upload", clear_on_submit=True):
         banner_caption = st.text_input("Carousel caption / Légende du carrousel")
         banner_files = st.file_uploader("Upload up to 10 carousel images / Téléverser jusqu’à 10 images", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True, key="homepage_banner_admin")
@@ -367,52 +344,38 @@ if admin_view:
             if c2.button("Reject / Refuser", key=f"reject_{ad['id']}", use_container_width=True):
                 update_ad_status(ad["id"], "rejected")
                 st.rerun()
-    st.subheader("Course pinning / Épingler les programmes")
-    st.caption("Pinned courses appear in the “High Demand Courses” section at the top of Study in Uganda.")
-    pinned_names = set(get_pinned_course_names())
-    for course_index, course in enumerate(COURSES):
-        course_label = course["name"]
-        is_pinned = course_label in pinned_names
-        pin_col, name_col = st.columns([1, 4])
-        with pin_col:
-            if is_pinned:
-                if st.button("Unpin / Désépingler", key=f"unpin_course_{course_index}"):
-                    set_course_pinned(course_label, False)
-                    st.rerun()
-            else:
-                if st.button("Pin / Épingler", key=f"pin_course_{course_index}"):
-                    set_course_pinned(course_label, True)
-                    st.rerun()
-        with name_col:
-            st.write(("📌 " if is_pinned else "") + course_label)
-
     st.subheader("Reviewed advertisements / Publicités examinées")
     for ad in [a for a in get_ads() if a["status"] in ("approved", "rejected")]:
         with st.expander(f"{ad['title']} — {ad['status']}"):
             st.image(ad["image_data"], use_container_width=True)
             if ad["status"] == "approved":
-                if st.button("Unpublish / Retirer", key=f"unpublish_{ad['id']}"):
+                r1, r2 = st.columns(2)
+                if r1.button("Unpublish / Retirer", key=f"unpublish_{ad['id']}", use_container_width=True):
                     update_ad_status(ad["id"], "rejected")
                     st.rerun()
+                if r2.button("Permanently delete / Supprimer définitivement", key=f"delete_ad_{ad['id']}", use_container_width=True):
+                    permanently_delete_ad(ad["id"])
+                    st.success("Deleted permanently from the database." if st.session_state.language == "English" else "Supprimé définitivement de la base de données.")
+                    st.rerun()
             else:
-                if st.button("Return to pending / Remettre en attente", key=f"repending_{ad['id']}"):
+                r1, r2 = st.columns(2)
+                if r1.button("Return to pending / Remettre en attente", key=f"repending_{ad['id']}", use_container_width=True):
                     update_ad_status(ad["id"], "pending")
                     st.rerun()
-                st.warning("This advertisement is unpublished. Permanent deletion cannot be undone.")
-                confirm_key = f"confirm_delete_ad_{ad['id']}"
-                if st.button("Delete permanently / Supprimer définitivement", key=f"delete_ad_{ad['id']}", type="secondary"):
-                    st.session_state[confirm_key] = True
-                if st.session_state.get(confirm_key, False):
-                    st.error(f"Confirm permanent deletion of “{ad['title']}”? This removes it from the database.")
-                    confirm_col, cancel_col = st.columns(2)
-                    if confirm_col.button("Yes, delete permanently", key=f"confirm_yes_delete_{ad['id']}", type="primary"):
-                        delete_ad_permanently(ad["id"])
-                        st.session_state.pop(confirm_key, None)
-                        st.success("Advertisement permanently deleted.")
-                        st.rerun()
-                    if cancel_col.button("Cancel", key=f"confirm_cancel_delete_{ad['id']}"):
-                        st.session_state.pop(confirm_key, None)
-                        st.rerun()
+                if r2.button("Permanently delete / Supprimer définitivement", key=f"delete_ad_{ad['id']}", type="secondary", use_container_width=True):
+                    permanently_delete_ad(ad["id"])
+                    st.success("Deleted permanently from the database." if st.session_state.language == "English" else "Supprimé définitivement de la base de données.")
+                    st.rerun()
+    st.subheader("Course pinning / Épingler les formations")
+    pinned_names = get_pinned_course_names()
+    for course in COURSES:
+        label = course["name"] if st.session_state.language == "English" else course["fr"]
+        currently_pinned = course["name"] in pinned_names
+        pc1, pc2 = st.columns([4, 1])
+        pc1.write(label)
+        if pc2.button("Unpin / Désépingler" if currently_pinned else "Pin / Épingler", key=f"pin_course_{course['name']}", use_container_width=True):
+            set_course_pinned(course["name"], not currently_pinned)
+            st.rerun()
     st.stop()
 
 if page == tr("nav_home"):
@@ -422,14 +385,14 @@ if page == tr("nav_home"):
     if home_banners:
         try:
             from streamlit_autorefresh import st_autorefresh
-            carousel_tick = st_autorefresh(interval=30_000, key="gabao_home_carousel_30s")
+            carousel_tick = st_autorefresh(interval=45_000, key="gabao_home_carousel_45s")
         except ImportError:
             carousel_tick = 0
             st.info("Install streamlit-autorefresh to rotate slides automatically." if st.session_state.language == "English" else "Installez streamlit-autorefresh pour faire défiler automatiquement les diapositives.")
         slide_index = (carousel_tick or 0) % len(home_banners)
         current_slide = home_banners[slide_index]
         st.image(current_slide["image_data"], caption=current_slide["caption"] or current_slide["title"].replace("HOMEPAGE BANNER:", "").strip(), use_container_width=True)
-        st.caption((f"Slide {slide_index + 1} / {len(home_banners)} · Rotation every 30 seconds" if st.session_state.language == "English" else f"Diapositive {slide_index + 1} / {len(home_banners)} · Rotation toutes les 30 secondes"))
+        st.caption((f"Slide {slide_index + 1} / {len(home_banners)} · Rotation every 45 seconds" if st.session_state.language == "English" else f"Diapositive {slide_index + 1} / {len(home_banners)} · Rotation toutes les 45 secondes"))
         if len(home_banners) > 1:
             chosen_slide = st.select_slider("Carousel / Carrousel", options=list(range(len(home_banners))), value=slide_index, format_func=lambda i: str(i + 1))
             if chosen_slide != slide_index:
@@ -493,21 +456,30 @@ elif page == tr("nav_courses"):
         area = c["area"] if st.session_state.language == "English" else c["area_fr"]
         if query.lower() in name.lower() and (selected_area == tr("all") or selected_area == area):
             visible.append(c)
-
-    pinned_names = set(get_pinned_course_names())
-    pinned_visible = [c for c in visible if c["name"] in pinned_names]
-    regular_visible = [c for c in visible if c["name"] not in pinned_names]
-
-    st.header("High Demand Courses")
-    if pinned_visible:
-        render_course_grid(pinned_visible, "high_demand")
-    st.divider()
-
-    st.header("All Courses" if st.session_state.language == "English" else "Tous les programmes")
-    if not regular_visible and not pinned_visible:
+    pinned_names = get_pinned_course_names()
+    # High Demand Courses are persistent across reruns and restarts because pin state is in SQLite.
+    high_demand = [c for c in visible if c["name"] in pinned_names]
+    regular_courses = [c for c in visible if c["name"] not in pinned_names]
+    def render_course_cards(course_list, prefix):
+        for start in range(0, len(course_list), 2):
+            row = st.columns(2)
+            for col, course in zip(row, course_list[start:start+2]):
+                with col:
+                    name = course["name"] if st.session_state.language == "English" else course["fr"]
+                    summary = course["summary"] if st.session_state.language == "English" else course["summary_fr"]
+                    st.markdown("### " + name)
+                    st.caption(f"{course.get('uni', 'Makerere University')} • {tr('duration')}: {course['years']} {tr('year')} • {money(course['fee'])}/{tr('per_year')}")
+                    st.write(summary)
+                    if st.button(tr("enquire"), key=f"{prefix}_enquire_{course['name']}", use_container_width=True):
+                        course_dialog(course)
+    if high_demand:
+        st.markdown("## High Demand Courses" if st.session_state.language == "English" else "## Formations très demandées")
+        render_course_cards(high_demand, "high")
+        st.markdown("---")
+    if not visible:
         st.info(tr("no_results"))
-    elif regular_visible:
-        render_course_grid(regular_visible, "all_courses")
+    else:
+        render_course_cards(regular_courses, "regular")
     st.caption(tr("disclaimer"))
 
 elif page == tr("nav_ads"):
