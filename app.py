@@ -385,7 +385,7 @@ if page == tr("nav_home"):
     if home_banners:
         try:
             from streamlit_autorefresh import st_autorefresh
-            carousel_tick = st_autorefresh(interval=45_000, key="gabao_home_carousel_45s")
+            carousel_tick = st_autorefresh(interval=30_000, key="gabao_home_carousel_30s")
         except ImportError:
             carousel_tick = 0
             st.info("Install streamlit-autorefresh to rotate slides automatically." if st.session_state.language == "English" else "Installez streamlit-autorefresh pour faire défiler automatiquement les diapositives.")
