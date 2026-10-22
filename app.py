@@ -5,7 +5,8 @@
 
 import os
 import html
-import sqlite3
+import sqlite3  # used by migration helper compatibility
+import contextlib
 from datetime import datetime
 from urllib.parse import quote
 
@@ -198,7 +199,30 @@ def course_dialog(course):
 
 
 # Advertisement approval workflow. SQLite stores uploads until an admin approves them.
+# Production database: Turso remote libSQL. No silent local-SQLite fallback.
 DB_PATH = os.environ.get("GABAO_DB_PATH", "gabao_tugende.db")
+TURSO_DATABASE_URL = ""
+TURSO_AUTH_TOKEN = ""
+try:
+    TURSO_DATABASE_URL = str(st.secrets.get("TURSO_DATABASE_URL", "")).strip()
+    TURSO_AUTH_TOKEN = str(st.secrets.get("TURSO_AUTH_TOKEN", "")).strip()
+except Exception:
+    pass
+TURSO_DATABASE_URL = TURSO_DATABASE_URL or os.environ.get("TURSO_DATABASE_URL", "").strip()
+TURSO_AUTH_TOKEN = TURSO_AUTH_TOKEN or os.environ.get("TURSO_AUTH_TOKEN", "").strip()
+
+if not TURSO_DATABASE_URL or not TURSO_AUTH_TOKEN:
+    st.error(
+        "Turso is not configured. Add TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in "
+        "Streamlit Community Cloud → App settings → Secrets."
+    )
+    st.stop()
+
+try:
+    import libsql
+except ImportError:
+    st.error("The Turso driver is missing. Add `libsql` to requirements.txt and redeploy.")
+    st.stop()
 
 def get_admin_password():
     try:
@@ -207,10 +231,28 @@ def get_admin_password():
         secret = ""
     return secret or os.environ.get("ADMIN_PASSWORD", "")
 
+@contextlib.contextmanager
 def db_connect():
-    conn = sqlite3.connect(DB_PATH, timeout=15)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Open a direct remote Turso connection; never fall back to a local file."""
+    conn = libsql.connect(database=TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def rows_as_dicts(cursor):
+    """Return DB-API rows as dictionaries so existing UI code can use row['field'].""" 
+    names = [col[0] for col in cursor.description or []]
+    return [dict(zip(names, row)) for row in cursor.fetchall()]
+
 
 def init_ad_db():
     with db_connect() as conn:
@@ -223,7 +265,6 @@ def init_ad_db():
                 submitted_at TEXT NOT NULL, reviewed_at TEXT DEFAULT NULL
             )
         """)
-        # Persistent pin state is stored in SQLite, not Streamlit session state.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS course_pins (
                 course_name TEXT PRIMARY KEY,
@@ -234,7 +275,7 @@ def init_ad_db():
 
 def save_ad(title, caption, uploaded_file):
     with db_connect() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """INSERT INTO advertisements
             (title, caption, filename, mime_type, image_data, status, submitted_at)
             VALUES (?, ?, ?, ?, ?, 'pending', ?)""",
@@ -242,12 +283,15 @@ def save_ad(title, caption, uploaded_file):
              uploaded_file.type or "application/octet-stream", uploaded_file.getvalue(),
              datetime.utcnow().isoformat(timespec="seconds") + "Z")
         )
+        return cursor.lastrowid
 
 def get_ads(status=None):
     with db_connect() as conn:
         if status:
-            return conn.execute("SELECT * FROM advertisements WHERE status=? ORDER BY id DESC", (status,)).fetchall()
-        return conn.execute("SELECT * FROM advertisements ORDER BY id DESC").fetchall()
+            cursor = conn.execute("SELECT * FROM advertisements WHERE status=? ORDER BY id DESC", (status,))
+        else:
+            cursor = conn.execute("SELECT * FROM advertisements ORDER BY id DESC")
+        return rows_as_dicts(cursor)
 
 def update_ad_status(ad_id, status):
     with db_connect() as conn:
@@ -305,7 +349,7 @@ if admin_view:
         st.stop()
     st.success("Administrator authenticated / Administrateur authentifié")
     st.subheader("Homepage banner / Bannière de la page d’accueil")
-    st.caption("Upload up to 10 images for the homepage carousel. Slides rotate every 45 seconds." if st.session_state.language == "English" else "Téléversez jusqu’à 10 images pour le carrousel de la page d’accueil. Les diapositives changent toutes les 45 secondes.")
+    st.caption("Upload up to 10 images for the homepage carousel. Slides rotate every 30 seconds." if st.session_state.language == "English" else "Téléversez jusqu’à 10 images pour le carrousel de la page d’accueil. Les diapositives changent toutes les 30 secondes.")
     with st.form("homepage_banner_upload", clear_on_submit=True):
         banner_caption = st.text_input("Carousel caption / Légende du carrousel")
         banner_files = st.file_uploader("Upload up to 10 carousel images / Téléverser jusqu’à 10 images", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True, key="homepage_banner_admin")
@@ -317,13 +361,14 @@ if admin_view:
             st.error("Please upload no more than 10 images at once." if st.session_state.language == "English" else "Veuillez téléverser 10 images maximum à la fois.")
         else:
             # Keep the latest ten approved homepage carousel images.
-            with sqlite3.connect(DB_PATH) as _conn:
+            with db_connect() as _conn:
                 _conn.execute("UPDATE advertisements SET status='rejected' WHERE title LIKE 'HOMEPAGE BANNER:%' AND status='approved'")
             for index, banner_file in enumerate(banner_files, start=1):
                 caption = banner_caption.strip() or banner_file.name
-                save_ad(f"HOMEPAGE BANNER: {index} — {banner_file.name}", caption, banner_file)
-                with sqlite3.connect(DB_PATH) as _conn:
-                    _conn.execute("UPDATE advertisements SET status='approved' WHERE filename=? AND status='pending'", (banner_file.name,))
+                banner_id = save_ad(f"HOMEPAGE BANNER: {index} — {banner_file.name}", caption, banner_file)
+                with db_connect() as _conn:
+                    _conn.execute("UPDATE advertisements SET status='approved', reviewed_at=? WHERE id=?",
+                                  (datetime.utcnow().isoformat(timespec="seconds") + "Z", banner_id))
             st.success("Carousel images published." if st.session_state.language == "English" else "Images du carrousel publiées.")
             st.rerun()
     pending = get_ads("pending")
