@@ -197,6 +197,29 @@ def course_dialog(course):
     _dialog()
 
 
+def render_course_grid(courses, key_prefix):
+    """Render course cards consistently in the pinned and regular catalogue."""
+    for start in range(0, len(courses), 2):
+        row = st.columns(2)
+        for col, course in zip(row, courses[start:start + 2]):
+            with col:
+                name = course["name"] if st.session_state.language == "English" else course["fr"]
+                summary = course["summary"] if st.session_state.language == "English" else course["summary_fr"]
+                st.markdown("### " + name)
+                st.caption(
+                    f"{course.get('uni', 'Makerere University')} • "
+                    f"{tr('duration')}: {course['years']} {tr('year')} • "
+                    f"{money(course['fee'])}/{tr('per_year')}"
+                )
+                st.write(summary)
+                if st.button(
+                    tr("enquire"),
+                    key=f"{key_prefix}_enquire_{course['name']}",
+                    use_container_width=True,
+                ):
+                    course_dialog(course)
+
+
 # Advertisement approval workflow. SQLite stores uploads until an admin approves them.
 DB_PATH = os.environ.get("GABAO_DB_PATH", "gabao_tugende.db")
 
@@ -223,6 +246,12 @@ def init_ad_db():
                 submitted_at TEXT NOT NULL, reviewed_at TEXT DEFAULT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pinned_courses (
+                course_name TEXT PRIMARY KEY,
+                pinned_at TEXT NOT NULL
+            )
+        """)
 
 def save_ad(title, caption, uploaded_file):
     with db_connect() as conn:
@@ -245,6 +274,26 @@ def update_ad_status(ad_id, status):
     with db_connect() as conn:
         conn.execute("UPDATE advertisements SET status=?, reviewed_at=? WHERE id=?",
                      (status, datetime.utcnow().isoformat(timespec="seconds") + "Z", ad_id))
+
+def delete_ad_permanently(ad_id):
+    """Permanently remove an advertisement and its stored image BLOB."""
+    with db_connect() as conn:
+        conn.execute("DELETE FROM advertisements WHERE id=? AND status='rejected'", (ad_id,))
+
+def get_pinned_course_names():
+    with db_connect() as conn:
+        rows = conn.execute("SELECT course_name FROM pinned_courses ORDER BY pinned_at ASC").fetchall()
+    return [row["course_name"] for row in rows]
+
+def set_course_pinned(course_name, pinned):
+    with db_connect() as conn:
+        if pinned:
+            conn.execute(
+                "INSERT OR IGNORE INTO pinned_courses (course_name, pinned_at) VALUES (?, ?)",
+                (course_name, datetime.utcnow().isoformat(timespec="seconds") + "Z"),
+            )
+        else:
+            conn.execute("DELETE FROM pinned_courses WHERE course_name=?", (course_name,))
 
 init_ad_db()
 
@@ -318,6 +367,25 @@ if admin_view:
             if c2.button("Reject / Refuser", key=f"reject_{ad['id']}", use_container_width=True):
                 update_ad_status(ad["id"], "rejected")
                 st.rerun()
+    st.subheader("Course pinning / Épingler les programmes")
+    st.caption("Pinned courses appear in the “High Demand Courses” section at the top of Study in Uganda.")
+    pinned_names = set(get_pinned_course_names())
+    for course_index, course in enumerate(COURSES):
+        course_label = course["name"]
+        is_pinned = course_label in pinned_names
+        pin_col, name_col = st.columns([1, 4])
+        with pin_col:
+            if is_pinned:
+                if st.button("Unpin / Désépingler", key=f"unpin_course_{course_index}"):
+                    set_course_pinned(course_label, False)
+                    st.rerun()
+            else:
+                if st.button("Pin / Épingler", key=f"pin_course_{course_index}"):
+                    set_course_pinned(course_label, True)
+                    st.rerun()
+        with name_col:
+            st.write(("📌 " if is_pinned else "") + course_label)
+
     st.subheader("Reviewed advertisements / Publicités examinées")
     for ad in [a for a in get_ads() if a["status"] in ("approved", "rejected")]:
         with st.expander(f"{ad['title']} — {ad['status']}"):
@@ -326,9 +394,25 @@ if admin_view:
                 if st.button("Unpublish / Retirer", key=f"unpublish_{ad['id']}"):
                     update_ad_status(ad["id"], "rejected")
                     st.rerun()
-            elif st.button("Return to pending / Remettre en attente", key=f"repending_{ad['id']}"):
-                update_ad_status(ad["id"], "pending")
-                st.rerun()
+            else:
+                if st.button("Return to pending / Remettre en attente", key=f"repending_{ad['id']}"):
+                    update_ad_status(ad["id"], "pending")
+                    st.rerun()
+                st.warning("This advertisement is unpublished. Permanent deletion cannot be undone.")
+                confirm_key = f"confirm_delete_ad_{ad['id']}"
+                if st.button("Delete permanently / Supprimer définitivement", key=f"delete_ad_{ad['id']}", type="secondary"):
+                    st.session_state[confirm_key] = True
+                if st.session_state.get(confirm_key, False):
+                    st.error(f"Confirm permanent deletion of “{ad['title']}”? This removes it from the database.")
+                    confirm_col, cancel_col = st.columns(2)
+                    if confirm_col.button("Yes, delete permanently", key=f"confirm_yes_delete_{ad['id']}", type="primary"):
+                        delete_ad_permanently(ad["id"])
+                        st.session_state.pop(confirm_key, None)
+                        st.success("Advertisement permanently deleted.")
+                        st.rerun()
+                    if cancel_col.button("Cancel", key=f"confirm_cancel_delete_{ad['id']}"):
+                        st.session_state.pop(confirm_key, None)
+                        st.rerun()
     st.stop()
 
 if page == tr("nav_home"):
@@ -409,19 +493,21 @@ elif page == tr("nav_courses"):
         area = c["area"] if st.session_state.language == "English" else c["area_fr"]
         if query.lower() in name.lower() and (selected_area == tr("all") or selected_area == area):
             visible.append(c)
-    if not visible:
+
+    pinned_names = set(get_pinned_course_names())
+    pinned_visible = [c for c in visible if c["name"] in pinned_names]
+    regular_visible = [c for c in visible if c["name"] not in pinned_names]
+
+    st.header("High Demand Courses")
+    if pinned_visible:
+        render_course_grid(pinned_visible, "high_demand")
+    st.divider()
+
+    st.header("All Courses" if st.session_state.language == "English" else "Tous les programmes")
+    if not regular_visible and not pinned_visible:
         st.info(tr("no_results"))
-    for start in range(0, len(visible), 2):
-        row = st.columns(2)
-        for col, course in zip(row, visible[start:start+2]):
-            with col:
-                name = course["name"] if st.session_state.language == "English" else course["fr"]
-                summary = course["summary"] if st.session_state.language == "English" else course["summary_fr"]
-                st.markdown("### " + name)
-                st.caption(f"{course.get('uni', 'Makerere University')} • {tr('duration')}: {course['years']} {tr('year')} • {money(course['fee'])}/{tr('per_year')}")
-                st.write(summary)
-                if st.button(tr("enquire"), key=f"enquire_{course['name']}", use_container_width=True):
-                    course_dialog(course)
+    elif regular_visible:
+        render_course_grid(regular_visible, "all_courses")
     st.caption(tr("disclaimer"))
 
 elif page == tr("nav_ads"):
