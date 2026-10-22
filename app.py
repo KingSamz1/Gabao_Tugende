@@ -279,7 +279,7 @@ if admin_view:
         st.stop()
     st.success("Administrator authenticated / Administrateur authentifié")
     st.subheader("Homepage banner / Bannière de la page d’accueil")
-    st.caption("Upload up to 10 images for the homepage carousel. Slides rotate every 45 seconds." if st.session_state.language == "English" else "Téléversez jusqu’à 10 images pour le carrousel de la page d’accueil. Les diapositives changent toutes les 45 secondes.")
+    st.caption("Upload up to 10 images for the homepage carousel. Slides rotate every 30 seconds." if st.session_state.language == "English" else "Téléversez jusqu’à 10 images pour le carrousel de la page d’accueil. Les diapositives changent toutes les 30 secondes.")
     with st.form("homepage_banner_upload", clear_on_submit=True):
         banner_caption = st.text_input("Carousel caption / Légende du carrousel")
         banner_files = st.file_uploader("Upload up to 10 carousel images / Téléverser jusqu’à 10 images", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True, key="homepage_banner_admin")
@@ -345,7 +345,7 @@ if page == tr("nav_home"):
         slide_index = (carousel_tick or 0) % len(home_banners)
         current_slide = home_banners[slide_index]
         st.image(current_slide["image_data"], caption=current_slide["caption"] or current_slide["title"].replace("HOMEPAGE BANNER:", "").strip(), use_container_width=True)
-        st.caption((f"Slide {slide_index + 1} / {len(home_banners)} · Rotation every 30 seconds" if st.session_state.language == "English" else f"Diapositive {slide_index + 1} / {len(home_banners)} · Rotation toutes les 45 secondes"))
+        st.caption((f"Slide {slide_index + 1} / {len(home_banners)} · Rotation every 30 seconds" if st.session_state.language == "English" else f"Diapositive {slide_index + 1} / {len(home_banners)} · Rotation toutes les 30 secondes"))
         if len(home_banners) > 1:
             chosen_slide = st.select_slider("Carousel / Carrousel", options=list(range(len(home_banners))), value=slide_index, format_func=lambda i: str(i + 1))
             if chosen_slide != slide_index:
