@@ -233,11 +233,8 @@ def get_admin_password():
 
 @contextlib.contextmanager
 def db_connect():
-    """Reuse one Turso connection per Streamlit session to avoid reconnect latency."""
-    conn = st.session_state.get("_gabao_turso_conn")
-    if conn is None:
-        conn = libsql.connect(database=TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
-        st.session_state["_gabao_turso_conn"] = conn
+    """Use a fresh remote connection per operation to avoid stale Hrana sessions."""
+    conn = libsql.connect(database=TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
     try:
         yield conn
         conn.commit()
@@ -246,13 +243,12 @@ def db_connect():
             conn.rollback()
         except Exception:
             pass
-        # Discard a failed connection so the next rerun can reconnect cleanly.
+        raise
+    finally:
         try:
             conn.close()
         except Exception:
             pass
-        st.session_state.pop("_gabao_turso_conn", None)
-        raise
 
 
 def rows_as_dicts(cursor):
@@ -262,23 +258,35 @@ def rows_as_dicts(cursor):
 
 
 def init_ad_db():
-    with db_connect() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS advertisements (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL, caption TEXT DEFAULT '',
-                filename TEXT NOT NULL, mime_type TEXT NOT NULL,
-                image_data BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-                submitted_at TEXT NOT NULL, reviewed_at TEXT DEFAULT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS course_pins (
-                course_name TEXT PRIMARY KEY,
-                is_pinned INTEGER NOT NULL DEFAULT 1,
-                updated_at TEXT NOT NULL
-            )
-        """)
+    """Create required tables; retry once if Turso closes a connection mid-request."""
+    last_error = None
+    for attempt in range(2):
+        try:
+            with db_connect() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS advertisements (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        title TEXT NOT NULL, caption TEXT DEFAULT '',
+                        filename TEXT NOT NULL, mime_type TEXT NOT NULL,
+                        image_data BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                        submitted_at TEXT NOT NULL, reviewed_at TEXT DEFAULT NULL
+                    )
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS course_pins (
+                        course_name TEXT PRIMARY KEY,
+                        is_pinned INTEGER NOT NULL DEFAULT 1,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0 and ("connection closed" in str(exc).lower() or "hrana" in str(exc).lower()):
+                continue
+            raise
+    if last_error:
+        raise last_error
 
 def save_ad(title, caption, uploaded_file):
     with db_connect() as conn:
